@@ -41,7 +41,7 @@ entities:
   power: sensor.bicibh_power
   heart_rate: sensor.bicibh_heart_rate
 default_period: week
-week_goals:
+weekly_goals:
   sessions: 4
   distance: 20000
   calories: 2000
@@ -70,7 +70,7 @@ Add only the entities your machine exposes:
 |--------|---------|-------------|
 | `name` | Fitness Stats | Card title |
 | `default_period` | week | Initial period view: `day`, `week`, `month`, `year` |
-| `week_goals` | — | Weekly goals (shown in week view only) |
+| `weekly_goals` | — | Weekly goals (shown in week view only) |
 
 ## Data source
 

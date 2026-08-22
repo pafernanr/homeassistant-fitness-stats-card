@@ -85,7 +85,7 @@ class FitnessStatsCard extends HTMLElement {
     this._config = {
       name: config.name || 'Fitness Stats',
       entities: config.entities,
-      goals: config.week_goals || {},
+      goals: config.weekly_goals || {},
       default_period: config.default_period || 'week',
     };
     this._periodType = this._config.default_period;
@@ -531,7 +531,7 @@ class FitnessStatsCard extends HTMLElement {
   }
 
   _renderGoals(sessions) {
-    const goals = this._config.week_goals;
+    const goals = this._config.weekly_goals;
     if (!goals || Object.keys(goals).length === 0) return '';
     if (this._periodType !== 'week') return '';
 
