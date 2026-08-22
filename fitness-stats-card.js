@@ -13,7 +13,7 @@ const ENTITY_META = {
 
 const SUMMARY_KEYS = ['distance', 'calories', 'time'];
 const PERIOD_TYPES = ['day', 'week', 'month', 'year'];
-const VERSION = '0.3.0';
+const VERSION = '0.3.1';
 
 const LINE_COLORS = {
   speed: '#3498db',
@@ -556,6 +556,7 @@ class FitnessStatsCard extends HTMLElement {
           ${this._renderHeader()}
           ${this._renderSummary(sessions, prevSessions)}
           ${this._renderChart()}
+          ${this._renderSessionChart()}
           ${this._renderGoals(sessions)}
           ${this._renderAveragesBests()}
         </div>
@@ -624,7 +625,6 @@ class FitnessStatsCard extends HTMLElement {
   }
 
   _renderChart() {
-    if (this._periodType === 'day') return this._renderDayChart();
     if (!this._selectedMetric) return '';
     const data = this._getChartData(this._selectedMetric);
     if (data.length === 0) return '<div class="chart-section empty">No data</div>';
@@ -687,16 +687,37 @@ class FitnessStatsCard extends HTMLElement {
       </div>`;
   }
 
-  _renderDayChart() {
+  _renderSessionChart() {
+    if (this._periodType !== 'day' || !this._dayHistory) return '';
+
     const measMetrics = this._getAvailableMetrics().filter(
       (k) => ENTITY_META[k].statType === 'measurement',
     );
-    if (measMetrics.length === 0) return '<div class="chart-section empty">No measurement data</div>';
+    if (measMetrics.length === 0) return '';
 
-    const hasHistory = this._dayHistory && measMetrics.some(k => (this._dayHistory[k]?.length || 0) > 0);
-    const W = 500, H = 180, PL = 10, PR = 10, PT = 15, PB = 25;
+    const hasData = measMetrics.some(k => (this._dayHistory[k] || []).some(d => d.value > 0));
+    if (!hasData) return '';
+
+    const W = 500, H = 200, PL = 55, PR = 10, PT = 20, PB = 25;
     const cW = W - PL - PR, cH = H - PT - PB;
-    let lines = '', xLabels = '';
+
+    let minTime = Infinity, maxTime = -Infinity;
+    for (const key of measMetrics) {
+      for (const d of (this._dayHistory[key] || [])) {
+        if (d.value > 0) {
+          const t = d.time.getTime();
+          if (t < minTime) minTime = t;
+          if (t > maxTime) maxTime = t;
+        }
+      }
+    }
+    if (minTime >= maxTime) return '';
+
+    const rawMin = minTime, rawMax = maxTime;
+    const pad = Math.max((maxTime - minTime) * 0.03, 5000);
+    minTime -= pad;
+    maxTime += pad;
+    const range = maxTime - minTime;
 
     let grid = '';
     for (let i = 1; i <= 3; i++) {
@@ -704,98 +725,61 @@ class FitnessStatsCard extends HTMLElement {
       grid += `<line x1="${PL}" y1="${y}" x2="${W - PR}" y2="${y}" stroke="var(--divider-color,#e0e0e0)" stroke-width="0.5"/>`;
     }
 
+    let lines = '', yLabels = '';
     const toggleData = {};
+    let yIdx = 0;
 
-    if (hasHistory) {
-      let minTime = Infinity, maxTime = -Infinity;
-      for (const key of measMetrics) {
-        for (const d of (this._dayHistory[key] || [])) {
-          if (d.value > 0) {
-            const t = d.time.getTime();
-            if (t < minTime) minTime = t;
-            if (t > maxTime) maxTime = t;
-          }
-        }
-      }
+    for (const key of measMetrics) {
+      const data = this._dayHistory[key] || [];
+      const active = data.filter(d => d.value > 0);
+      toggleData[key] = active.length > 0
+        ? active.reduce((s, d) => s + d.value, 0) / active.length : 0;
 
-      if (minTime < maxTime) {
-        const pad = Math.max((maxTime - minTime) * 0.02, 5000);
-        minTime -= pad;
-        maxTime += pad;
-        const range = maxTime - minTime;
+      if (!this._visibleLines.has(key) || active.length === 0) continue;
+      const max = Math.max(...active.map(d => d.value));
+      if (max <= 0) continue;
 
-        for (const key of measMetrics) {
-          const data = this._dayHistory[key] || [];
-          const active = data.filter(d => d.value > 0);
-          toggleData[key] = active.length > 0
-            ? active.reduce((s, d) => s + d.value, 0) / active.length : 0;
+      const color = LINE_COLORS[key] || '#999';
+      const unit = this._units[key] || '';
+      const maxStr = formatValue(max, key, unit);
+      yLabels += `<text x="${PL - 4}" y="${PT + 5 + yIdx * 13}" text-anchor="end" fill="${color}" font-size="9" font-weight="500">${maxStr} ${unit}</text>`;
+      yIdx++;
 
-          if (!this._visibleLines.has(key) || active.length === 0) continue;
-          const max = Math.max(...active.map(d => d.value));
-          if (max <= 0) continue;
-
-          const segments = this._splitIntoSessions(data);
-          const color = LINE_COLORS[key] || '#999';
-          for (const seg of segments) {
-            const points = seg.map(d => {
-              const x = PL + ((d.time.getTime() - minTime) / range) * cW;
-              const y = PT + cH - (d.value / max) * cH * 0.9;
-              return `${x.toFixed(1)},${y.toFixed(1)}`;
-            });
-            if (points.length > 1) {
-              lines += `<polyline points="${points.join(' ')}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
-            } else if (points.length === 1) {
-              const [px, py] = points[0].split(',');
-              lines += `<circle cx="${px}" cy="${py}" r="3" fill="${color}"/>`;
-            }
-          }
-        }
-
-        const durationMin = (maxTime - minTime) / 60000;
-        let intervalMin;
-        if (durationMin < 5) intervalMin = 1;
-        else if (durationMin < 15) intervalMin = 2;
-        else if (durationMin < 30) intervalMin = 5;
-        else if (durationMin < 60) intervalMin = 10;
-        else intervalMin = 15;
-        const intervalMs = intervalMin * 60000;
-        const first = Math.ceil(minTime / intervalMs) * intervalMs;
-        for (let t = first; t <= maxTime; t += intervalMs) {
-          const x = PL + ((t - minTime) / range) * cW;
-          const d = new Date(t);
-          const lbl = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-          xLabels += `<text x="${x.toFixed(1)}" y="${H - 5}" text-anchor="middle" fill="var(--secondary-text-color)" font-size="10">${lbl}</text>`;
-        }
-      }
-    } else {
-      for (const key of measMetrics) {
-        const data = this._getDayLineData(key);
-        const values = data.filter(v => v != null);
-        toggleData[key] = values.length > 0
-          ? values.reduce((s, v) => s + v, 0) / values.length : 0;
-
-        if (!this._visibleLines.has(key) || values.length === 0) continue;
-        const max = Math.max(...values);
-        if (max <= 0) continue;
-
-        const points = [];
-        for (let h = 0; h < 24; h++) {
-          if (data[h] == null) continue;
-          const x = PL + (h / 23) * cW;
-          const y = PT + cH - (data[h] / max) * cH * 0.9;
-          points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
-        }
-        const color = LINE_COLORS[key] || '#999';
+      const segments = this._splitIntoSessions(data);
+      for (const seg of segments) {
+        const points = seg.map(d => {
+          const x = PL + ((d.time.getTime() - minTime) / range) * cW;
+          const y = PT + cH - (d.value / max) * cH * 0.9;
+          return `${x.toFixed(1)},${y.toFixed(1)}`;
+        });
         if (points.length > 1) {
-          lines += `<polyline points="${points.join(' ')}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+          lines += `<polyline points="${points.join(' ')}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
         } else if (points.length === 1) {
           const [px, py] = points[0].split(',');
-          lines += `<circle cx="${px}" cy="${py}" r="3.5" fill="${color}"/>`;
+          lines += `<circle cx="${px}" cy="${py}" r="3" fill="${color}"/>`;
         }
       }
-      for (let h = 0; h < 24; h += 3) {
-        const x = PL + (h / 23) * cW;
-        xLabels += `<text x="${x}" y="${H - 5}" text-anchor="middle" fill="var(--secondary-text-color)" font-size="10">${h}h</text>`;
+    }
+    yLabels += `<text x="${PL - 4}" y="${PT + cH + 4}" text-anchor="end" fill="var(--secondary-text-color)" font-size="9">0</text>`;
+
+    const fmt = d => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    let xLabels = '';
+    xLabels += `<text x="${PL}" y="${H - 5}" text-anchor="start" fill="var(--secondary-text-color)" font-size="10">${fmt(new Date(rawMin))}</text>`;
+    xLabels += `<text x="${W - PR}" y="${H - 5}" text-anchor="end" fill="var(--secondary-text-color)" font-size="10">${fmt(new Date(rawMax))}</text>`;
+
+    const durationMin = (rawMax - rawMin) / 60000;
+    if (durationMin > 3) {
+      let intervalMin;
+      if (durationMin < 10) intervalMin = 2;
+      else if (durationMin < 30) intervalMin = 5;
+      else if (durationMin < 60) intervalMin = 10;
+      else intervalMin = 15;
+      const intervalMs = intervalMin * 60000;
+      const first = Math.ceil(rawMin / intervalMs) * intervalMs;
+      for (let t = first; t <= rawMax; t += intervalMs) {
+        const x = PL + ((t - minTime) / range) * cW;
+        if (x < PL + 30 || x > W - PR - 30) continue;
+        xLabels += `<text x="${x.toFixed(1)}" y="${H - 5}" text-anchor="middle" fill="var(--secondary-text-color)" font-size="10">${fmt(new Date(t))}</text>`;
       }
     }
 
@@ -810,9 +794,10 @@ class FitnessStatsCard extends HTMLElement {
 
     return `
       <div class="chart-section">
+        <div class="section-title">Session</div>
         <div class="line-toggles">${toggles}</div>
-        <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" class="chart-svg" role="img" aria-label="Day detail chart">
-          ${grid}${lines}${xLabels}
+        <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" class="chart-svg" role="img" aria-label="Session chart">
+          ${grid}${yLabels}${lines}${xLabels}
         </svg>
       </div>`;
   }
