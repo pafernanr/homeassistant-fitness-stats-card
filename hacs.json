@@ -1,5 +1,6 @@
 {
   "name": "Fitness Stats Card",
   "render_readme": true,
+  "content_in_root": true,
   "filename": "fitness-stats-card.js"
 }
