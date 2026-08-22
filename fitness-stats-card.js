@@ -13,7 +13,7 @@ const ENTITY_META = {
 
 const SUMMARY_KEYS = ['distance', 'calories', 'time'];
 const PERIOD_TYPES = ['day', 'week', 'month', 'year'];
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 
 const LINE_COLORS = {
   speed: '#3498db',
@@ -212,10 +212,11 @@ class FitnessStatsCard extends HTMLElement {
 
     const cur = this._getPeriodRange(this._periodType, this._offset);
     const prev = this._getPeriodRange(this._periodType, this._offset - 1);
+    this._currentRange = cur;
     const period = this._periodType === 'year' ? 'month' : this._periodType === 'day' ? 'hour' : 'day';
 
     try {
-      const [currentStats, previousStats] = await Promise.all([
+      const statsPromise = Promise.all([
         this._hass.callWS({
           type: 'recorder/statistics_during_period',
           start_time: cur.start.toISOString(),
@@ -231,18 +232,28 @@ class FitnessStatsCard extends HTMLElement {
           period,
         }),
       ]);
+
+      let historyPromise = Promise.resolve(null);
+      if (this._periodType === 'day') {
+        historyPromise = this._hass.callApi('GET',
+          `history/period/${cur.start.toISOString()}?filter_entity_id=${ids.join(',')}&end_time=${cur.end.toISOString()}&minimal_response&no_attributes`
+        ).catch(err => { console.warn('fitness-stats-card: history fetch failed', err); return null; });
+      }
+
+      const [[currentStats, previousStats], historyData] = await Promise.all([statsPromise, historyPromise]);
+
+      this._currentStats = currentStats;
+      this._previousStats = previousStats;
+      this._dayHistory = this._parseDayHistory(historyData);
+
       console.debug('fitness-stats-card: fetched', {
         period: this._periodType,
         offset: this._offset,
-        ids,
-        currentKeys: Object.keys(currentStats || {}),
-        currentEntries: Object.fromEntries(
-          Object.entries(currentStats || {}).map(([k, v]) => [k, v.length]),
-        ),
+        dayHistory: this._dayHistory ? Object.fromEntries(
+          Object.entries(this._dayHistory).map(([k, v]) => [k, v.length])
+        ) : null,
       });
-      this._currentStats = currentStats;
-      this._previousStats = previousStats;
-      this._currentRange = cur;
+
       this._render();
     } catch (err) {
       console.error('fitness-stats-card: fetch failed', err);
@@ -252,6 +263,21 @@ class FitnessStatsCard extends HTMLElement {
   }
 
   _getTotal(stats, key) {
+    if (this._periodType === 'day' && stats === this._currentStats && this._dayHistory?.[key]?.length > 0) {
+      const meta = ENTITY_META[key];
+      if (meta.statType === 'total') {
+        const sessions = this._splitIntoSessions(this._dayHistory[key]);
+        let total = 0;
+        for (const sess of sessions) {
+          const vals = sess.map(d => d.value);
+          total += Math.max(...vals) - Math.min(...vals);
+        }
+        return total;
+      }
+      const active = this._dayHistory[key].filter(d => d.value > 0);
+      if (active.length === 0) return 0;
+      return active.reduce((s, d) => s + d.value, 0) / active.length;
+    }
     const id = this._config.entities[key];
     if (!id || !stats?.[id]) return 0;
     const meta = ENTITY_META[key];
@@ -265,6 +291,9 @@ class FitnessStatsCard extends HTMLElement {
   }
 
   _countSessions(stats) {
+    if (this._periodType === 'day' && stats === this._currentStats && this._dayHistory) {
+      return this._detectSessions().length;
+    }
     const ids = Object.entries(this._config.entities)
       .filter(([k]) => ENTITY_META[k]?.statType === 'total')
       .map(([, id]) => id)
@@ -445,6 +474,60 @@ class FitnessStatsCard extends HTMLElement {
     return hourData;
   }
 
+  _parseDayHistory(historyData) {
+    if (!historyData) return null;
+    const result = {};
+    for (const entityHistory of historyData) {
+      if (!entityHistory?.length) continue;
+      const entityId = entityHistory[0].entity_id;
+      const metricKey = this._entityToMetric[entityId];
+      if (!metricKey) continue;
+      result[metricKey] = entityHistory
+        .filter(s => s.state !== 'unknown' && s.state !== 'unavailable')
+        .map(s => ({ time: new Date(s.last_changed), value: parseFloat(s.state) }))
+        .filter(d => !isNaN(d.value));
+    }
+    return Object.keys(result).length > 0 ? result : null;
+  }
+
+  _splitIntoSessions(data, gapMs) {
+    if (!data || data.length === 0) return [];
+    gapMs = gapMs || 300000;
+    const sorted = [...data].sort((a, b) => a.time.getTime() - b.time.getTime());
+    const sessions = [[sorted[0]]];
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i].time.getTime() - sorted[i - 1].time.getTime() > gapMs) {
+        sessions.push([]);
+      }
+      sessions[sessions.length - 1].push(sorted[i]);
+    }
+    return sessions;
+  }
+
+  _detectSessions() {
+    if (!this._dayHistory) return [];
+    const allTimes = [];
+    for (const [key, data] of Object.entries(this._dayHistory)) {
+      if (ENTITY_META[key]?.statType !== 'measurement') continue;
+      for (const d of data) {
+        if (d.value > 0) allTimes.push(d.time.getTime());
+      }
+    }
+    if (allTimes.length === 0) return [];
+    allTimes.sort((a, b) => a - b);
+    const GAP = 300000;
+    const sessions = [{ start: allTimes[0], end: allTimes[0] }];
+    for (let i = 1; i < allTimes.length; i++) {
+      const last = sessions[sessions.length - 1];
+      if (allTimes[i] - last.end > GAP) {
+        sessions.push({ start: allTimes[i], end: allTimes[i] });
+      } else {
+        last.end = allTimes[i];
+      }
+    }
+    return sessions.filter(s => s.end - s.start >= 30000);
+  }
+
   // --- Render ---
 
   _render() {
@@ -610,13 +693,10 @@ class FitnessStatsCard extends HTMLElement {
     );
     if (measMetrics.length === 0) return '<div class="chart-section empty">No measurement data</div>';
 
+    const hasHistory = this._dayHistory && measMetrics.some(k => (this._dayHistory[k]?.length || 0) > 0);
     const W = 500, H = 180, PL = 10, PR = 10, PT = 15, PB = 25;
     const cW = W - PL - PR, cH = H - PT - PB;
-
-    const lineData = {};
-    for (const key of measMetrics) {
-      lineData[key] = this._getDayLineData(key);
-    }
+    let lines = '', xLabels = '';
 
     let grid = '';
     for (let i = 1; i <= 3; i++) {
@@ -624,53 +704,109 @@ class FitnessStatsCard extends HTMLElement {
       grid += `<line x1="${PL}" y1="${y}" x2="${W - PR}" y2="${y}" stroke="var(--divider-color,#e0e0e0)" stroke-width="0.5"/>`;
     }
 
-    let lines = '';
-    for (const key of measMetrics) {
-      if (!this._visibleLines.has(key)) continue;
-      const data = lineData[key];
-      const values = data.filter((v) => v != null);
-      if (values.length === 0) continue;
-      const max = Math.max(...values);
-      if (max <= 0) continue;
+    const toggleData = {};
 
-      const points = [];
-      for (let h = 0; h < 24; h++) {
-        if (data[h] == null) continue;
-        const x = PL + (h / 23) * cW;
-        const y = PT + cH - (data[h] / max) * cH * 0.9;
-        points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    if (hasHistory) {
+      let minTime = Infinity, maxTime = -Infinity;
+      for (const key of measMetrics) {
+        for (const d of (this._dayHistory[key] || [])) {
+          if (d.value > 0) {
+            const t = d.time.getTime();
+            if (t < minTime) minTime = t;
+            if (t > maxTime) maxTime = t;
+          }
+        }
       }
-      const color = LINE_COLORS[key] || '#999';
-      if (points.length > 1) {
-        lines += `<polyline points="${points.join(' ')}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
-      } else if (points.length === 1) {
-        const [px, py] = points[0].split(',');
-        lines += `<circle cx="${px}" cy="${py}" r="3.5" fill="${color}"/>`;
+
+      if (minTime < maxTime) {
+        const pad = Math.max((maxTime - minTime) * 0.02, 5000);
+        minTime -= pad;
+        maxTime += pad;
+        const range = maxTime - minTime;
+
+        for (const key of measMetrics) {
+          const data = this._dayHistory[key] || [];
+          const active = data.filter(d => d.value > 0);
+          toggleData[key] = active.length > 0
+            ? active.reduce((s, d) => s + d.value, 0) / active.length : 0;
+
+          if (!this._visibleLines.has(key) || active.length === 0) continue;
+          const max = Math.max(...active.map(d => d.value));
+          if (max <= 0) continue;
+
+          const segments = this._splitIntoSessions(data);
+          const color = LINE_COLORS[key] || '#999';
+          for (const seg of segments) {
+            const points = seg.map(d => {
+              const x = PL + ((d.time.getTime() - minTime) / range) * cW;
+              const y = PT + cH - (d.value / max) * cH * 0.9;
+              return `${x.toFixed(1)},${y.toFixed(1)}`;
+            });
+            if (points.length > 1) {
+              lines += `<polyline points="${points.join(' ')}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+            } else if (points.length === 1) {
+              const [px, py] = points[0].split(',');
+              lines += `<circle cx="${px}" cy="${py}" r="3" fill="${color}"/>`;
+            }
+          }
+        }
+
+        const durationMin = (maxTime - minTime) / 60000;
+        let intervalMin;
+        if (durationMin < 5) intervalMin = 1;
+        else if (durationMin < 15) intervalMin = 2;
+        else if (durationMin < 30) intervalMin = 5;
+        else if (durationMin < 60) intervalMin = 10;
+        else intervalMin = 15;
+        const intervalMs = intervalMin * 60000;
+        const first = Math.ceil(minTime / intervalMs) * intervalMs;
+        for (let t = first; t <= maxTime; t += intervalMs) {
+          const x = PL + ((t - minTime) / range) * cW;
+          const d = new Date(t);
+          const lbl = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+          xLabels += `<text x="${x.toFixed(1)}" y="${H - 5}" text-anchor="middle" fill="var(--secondary-text-color)" font-size="10">${lbl}</text>`;
+        }
       }
-    }
+    } else {
+      for (const key of measMetrics) {
+        const data = this._getDayLineData(key);
+        const values = data.filter(v => v != null);
+        toggleData[key] = values.length > 0
+          ? values.reduce((s, v) => s + v, 0) / values.length : 0;
 
-    let xLabels = '';
-    for (let h = 0; h < 24; h += 3) {
-      const x = PL + (h / 23) * cW;
-      xLabels += `<text x="${x}" y="${H - 5}" text-anchor="middle" fill="var(--secondary-text-color)" font-size="10">${h}h</text>`;
-    }
+        if (!this._visibleLines.has(key) || values.length === 0) continue;
+        const max = Math.max(...values);
+        if (max <= 0) continue;
 
-    const toggles = measMetrics
-      .map((key) => {
-        const active = this._visibleLines.has(key);
-        const data = lineData[key];
-        const values = data.filter((v) => v != null);
-        const avg =
-          values.length > 0
-            ? values.reduce((s, v) => s + v, 0) / values.length
-            : 0;
-        const unit = this._units[key] || '';
+        const points = [];
+        for (let h = 0; h < 24; h++) {
+          if (data[h] == null) continue;
+          const x = PL + (h / 23) * cW;
+          const y = PT + cH - (data[h] / max) * cH * 0.9;
+          points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+        }
         const color = LINE_COLORS[key] || '#999';
-        const valStr =
-          avg > 0 ? ` ${formatValue(avg, key, unit)} ${unit}` : '';
-        return `<button class="line-toggle${active ? ' active' : ''}" data-line="${key}" style="--line-color:${color}"><span class="line-swatch"></span>${ENTITY_META[key].label}${valStr}</button>`;
-      })
-      .join('');
+        if (points.length > 1) {
+          lines += `<polyline points="${points.join(' ')}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+        } else if (points.length === 1) {
+          const [px, py] = points[0].split(',');
+          lines += `<circle cx="${px}" cy="${py}" r="3.5" fill="${color}"/>`;
+        }
+      }
+      for (let h = 0; h < 24; h += 3) {
+        const x = PL + (h / 23) * cW;
+        xLabels += `<text x="${x}" y="${H - 5}" text-anchor="middle" fill="var(--secondary-text-color)" font-size="10">${h}h</text>`;
+      }
+    }
+
+    const toggles = measMetrics.map(key => {
+      const active = this._visibleLines.has(key);
+      const avg = toggleData[key] || 0;
+      const unit = this._units[key] || '';
+      const color = LINE_COLORS[key] || '#999';
+      const valStr = avg > 0 ? ` ${formatValue(avg, key, unit)} ${unit}` : '';
+      return `<button class="line-toggle${active ? ' active' : ''}" data-line="${key}" style="--line-color:${color}"><span class="line-swatch"></span>${ENTITY_META[key].label}${valStr}</button>`;
+    }).join('');
 
     return `
       <div class="chart-section">
