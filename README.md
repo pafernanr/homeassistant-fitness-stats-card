@@ -6,7 +6,7 @@ Works with any FTMS (Fitness Machine Service) integration — cross trainers, tr
 
 ## Features
 
-- **Period navigation**: week / month / year views with previous/next
+- **Period navigation**: day / week / month / year views with previous/next
 - **Summary**: session count, distance, calories, time with delta vs previous period
 - **Bar chart**: per-day or per-month breakdown with metric selector
 - **Goals**: weekly progress bars (sessions, distance, calories, time)
@@ -41,7 +41,7 @@ entities:
   power: sensor.bicibh_power
   heart_rate: sensor.bicibh_heart_rate
 default_period: week
-goals:
+week_goals:
   sessions: 4
   distance: 20000
   calories: 2000
@@ -69,8 +69,8 @@ Add only the entities your machine exposes:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `name` | Fitness Stats | Card title |
-| `default_period` | week | Initial period view: `week`, `month`, `year` |
-| `goals` | — | Weekly goals (shown in week view only) |
+| `default_period` | week | Initial period view: `day`, `week`, `month`, `year` |
+| `week_goals` | — | Weekly goals (shown in week view only) |
 
 ## Data source
 

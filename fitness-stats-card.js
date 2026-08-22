@@ -12,7 +12,8 @@ const ENTITY_META = {
 };
 
 const SUMMARY_KEYS = ['distance', 'calories', 'time'];
-const PERIOD_TYPES = ['week', 'month', 'year'];
+const PERIOD_TYPES = ['day', 'week', 'month', 'year'];
+const VERSION = '0.1.0';
 
 function formatDuration(seconds) {
   if (!seconds || seconds <= 0) return '0m';
@@ -84,7 +85,7 @@ class FitnessStatsCard extends HTMLElement {
     this._config = {
       name: config.name || 'Fitness Stats',
       entities: config.entities,
-      goals: config.goals || {},
+      goals: config.week_goals || {},
       default_period: config.default_period || 'week',
     };
     this._periodType = this._config.default_period;
@@ -141,7 +142,11 @@ class FitnessStatsCard extends HTMLElement {
   _getPeriodRange(type, offset) {
     const now = new Date();
     let start, end;
-    if (type === 'week') {
+    if (type === 'day') {
+      start = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset);
+      end = new Date(start);
+      end.setDate(end.getDate() + 1);
+    } else if (type === 'week') {
       const day = now.getDay();
       const toMon = day === 0 ? 6 : day - 1;
       start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - toMon);
@@ -160,6 +165,9 @@ class FitnessStatsCard extends HTMLElement {
 
   _getPeriodLabel() {
     const { start, end } = this._getPeriodRange(this._periodType, this._offset);
+    if (this._periodType === 'day') {
+      return start.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+    }
     if (this._periodType === 'week') {
       const last = new Date(end);
       last.setDate(last.getDate() - 1);
@@ -182,7 +190,7 @@ class FitnessStatsCard extends HTMLElement {
 
     const cur = this._getPeriodRange(this._periodType, this._offset);
     const prev = this._getPeriodRange(this._periodType, this._offset - 1);
-    const period = this._periodType === 'year' ? 'month' : 'day';
+    const period = this._periodType === 'year' ? 'month' : this._periodType === 'day' ? 'hour' : 'day';
 
     try {
       const [currentStats, previousStats] = await Promise.all([
@@ -267,23 +275,31 @@ class FitnessStatsCard extends HTMLElement {
     if (!id || !this._currentStats?.[id]) return [];
     const meta = ENTITY_META[key];
     const entries = this._currentStats[id];
+    const isDay = this._periodType === 'day';
     const yearly = this._periodType === 'year';
 
     const valueMap = {};
     for (const e of entries) {
-      const dk = dateToKey(startToDate(e.start), yearly);
+      let dk;
+      if (isDay) {
+        dk = String(startToDate(e.start).getHours());
+      } else {
+        dk = dateToKey(startToDate(e.start), yearly);
+      }
       const v = meta.statType === 'total' ? (e.change || 0) : (e.mean || 0);
       valueMap[dk] = (valueMap[dk] || 0) + v;
     }
 
-    const { start, end } = this._currentRange;
     const keys = [];
-    if (yearly) {
+    if (isDay) {
+      for (let h = 0; h < 24; h++) keys.push(String(h));
+    } else if (yearly) {
       for (let m = 0; m < 12; m++) {
-        const d = new Date(start.getFullYear(), m, 1);
+        const d = new Date(this._currentRange.start.getFullYear(), m, 1);
         keys.push(dateToKey(d, true));
       }
     } else {
+      const { start, end } = this._currentRange;
       const d = new Date(start);
       while (d < end) {
         keys.push(dateToKey(d, false));
@@ -297,6 +313,9 @@ class FitnessStatsCard extends HTMLElement {
   }
 
   _getBarLabel(dateKey, index) {
+    if (this._periodType === 'day') {
+      return `${index}h`;
+    }
     if (this._periodType === 'year') {
       return ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][index] || '';
     }
@@ -308,6 +327,7 @@ class FitnessStatsCard extends HTMLElement {
 
   _shouldShowLabel(index, total) {
     if (total <= 14) return true;
+    if (total === 24) return index % 3 === 0;
     const day = index + 1;
     return day === 1 || day % 5 === 0;
   }
@@ -511,7 +531,7 @@ class FitnessStatsCard extends HTMLElement {
   }
 
   _renderGoals(sessions) {
-    const goals = this._config.goals;
+    const goals = this._config.week_goals;
     if (!goals || Object.keys(goals).length === 0) return '';
     if (this._periodType !== 'week') return '';
 
@@ -721,9 +741,12 @@ class FitnessStatsCard extends HTMLElement {
 
 customElements.define('fitness-stats-card', FitnessStatsCard);
 
+console.info(`%c FITNESS-STATS-CARD %c v${VERSION} `, 'background:#3498db;color:#fff;font-weight:bold', 'background:#555;color:#fff');
+
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: 'fitness-stats-card',
   name: 'Fitness Stats Card',
   description: 'Training statistics with period navigation for fitness machines',
+  version: VERSION,
 });
