@@ -13,7 +13,20 @@ const ENTITY_META = {
 
 const SUMMARY_KEYS = ['distance', 'calories', 'time'];
 const PERIOD_TYPES = ['day', 'week', 'month', 'year'];
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
+
+const LINE_COLORS = {
+  speed: '#3498db',
+  power: '#e74c3c',
+  heart_rate: '#e91e63',
+  cadence: '#2ecc71',
+  step_rate: '#9b59b6',
+  stroke_rate: '#f39c12',
+  resistance: '#1abc9c',
+  distance: '#3498db',
+  calories: '#e67e22',
+  time: '#16a085',
+};
 
 function formatDuration(seconds) {
   if (!seconds || seconds <= 0) return '0m';
@@ -68,6 +81,8 @@ class FitnessStatsCard extends HTMLElement {
     this._entityToMetric = {};
     this._units = {};
     this._refreshInterval = null;
+    this._visibleLines = new Set();
+    this._drillFrom = null;
   }
 
   static getStubConfig() {
@@ -95,6 +110,13 @@ class FitnessStatsCard extends HTMLElement {
     }
     if (!this._selectedMetric) {
       this._selectedMetric = this._getAvailableMetrics()[0] || null;
+    }
+    if (this._visibleLines.size === 0) {
+      for (const [key, id] of Object.entries(this._config.entities)) {
+        if (id && ENTITY_META[key]?.statType === 'measurement') {
+          this._visibleLines.add(key);
+        }
+      }
     }
     if (this._hass) this._fetchData();
   }
@@ -381,6 +403,48 @@ class FitnessStatsCard extends HTMLElement {
     return bests;
   }
 
+  // --- Drill-down ---
+
+  _drillToDay(barIndex) {
+    const { start } = this._currentRange;
+    let target;
+    if (this._periodType === 'year') {
+      target = new Date(start.getFullYear(), barIndex, 1);
+    } else {
+      target = new Date(start);
+      target.setDate(target.getDate() + barIndex);
+    }
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const diff = Math.round((target - today) / 86400000);
+    this._drillFrom = { periodType: this._periodType, offset: this._offset };
+    this._periodType = 'day';
+    this._offset = diff;
+    this._fetchData();
+  }
+
+  _drillBack() {
+    if (!this._drillFrom) return;
+    this._periodType = this._drillFrom.periodType;
+    this._offset = this._drillFrom.offset;
+    this._drillFrom = null;
+    this._fetchData();
+  }
+
+  _getDayLineData(key) {
+    const id = this._config.entities[key];
+    if (!id || !this._currentStats?.[id]) return new Array(24).fill(null);
+    const entries = this._currentStats[id];
+    const meta = ENTITY_META[key];
+    const hourData = new Array(24).fill(null);
+    for (const e of entries) {
+      const h = startToDate(e.start).getHours();
+      const v = meta.statType === 'total' ? (e.change || 0) : (e.mean || 0);
+      if (v > 0) hourData[h] = (hourData[h] || 0) + v;
+    }
+    return hourData;
+  }
+
   // --- Render ---
 
   _render() {
@@ -424,6 +488,10 @@ class FitnessStatsCard extends HTMLElement {
         `<button class="period-btn${t === this._periodType ? ' active' : ''}" data-period="${t}">${t[0].toUpperCase() + t.slice(1)}</button>`,
     ).join('');
 
+    const backBtn = this._drillFrom
+      ? `<button class="back-btn" data-action="back">&#9664; ${this._drillFrom.periodType[0].toUpperCase() + this._drillFrom.periodType.slice(1)}</button>`
+      : '';
+
     return `
       <div class="header">
         <div class="header-top">
@@ -431,6 +499,7 @@ class FitnessStatsCard extends HTMLElement {
           <div class="period-tabs">${tabs}</div>
         </div>
         <div class="header-nav">
+          ${backBtn}
           <button class="nav-btn" data-dir="-1" aria-label="Previous">&#9664;</button>
           <span class="period-label">${label}</span>
           <button class="nav-btn" data-dir="1"${this._offset >= 0 ? ' disabled' : ''} aria-label="Next">&#9654;</button>
@@ -472,9 +541,10 @@ class FitnessStatsCard extends HTMLElement {
   }
 
   _renderChart() {
+    if (this._periodType === 'day') return this._renderDayChart();
     if (!this._selectedMetric) return '';
     const data = this._getChartData(this._selectedMetric);
-    if (data.length === 0) return '<div class="chart-section">No data</div>';
+    if (data.length === 0) return '<div class="chart-section empty">No data</div>';
 
     const maxVal = Math.max(...data.map((d) => d.value), 0);
     const niceMax = this._niceMax(maxVal, 4);
@@ -496,6 +566,7 @@ class FitnessStatsCard extends HTMLElement {
     }
 
     let bars = '', xLabels = '';
+    const clickable = this._periodType !== 'day';
     for (let i = 0; i < n; i++) {
       const d = data[i];
       const x = PL + i * (bW + gap);
@@ -503,7 +574,10 @@ class FitnessStatsCard extends HTMLElement {
         const h = Math.max(2, (cH * d.value) / niceMax);
         const y = PT + cH - h;
         const r = Math.min(3, bW / 2);
-        bars += `<rect x="${x}" y="${y}" width="${bW}" height="${h}" rx="${r}" ry="${r}" fill="var(--primary-color)" opacity="0.85"/>`;
+        bars += `<rect x="${x}" y="${y}" width="${bW}" height="${h}" rx="${r}" ry="${r}" fill="var(--primary-color)" opacity="0.85" class="chart-bar" data-bar-index="${i}"/>`;
+      }
+      if (clickable) {
+        bars += `<rect x="${x}" y="${PT}" width="${bW}" height="${cH}" fill="transparent" class="chart-bar-hit" data-bar-index="${i}"/>`;
       }
       if (this._shouldShowLabel(i, n)) {
         const lb = this._getBarLabel(d.key, i);
@@ -526,6 +600,83 @@ class FitnessStatsCard extends HTMLElement {
         <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" class="chart-svg" role="img" aria-label="Statistics chart">
           ${grid}${yLabels}${bars}${xLabels}
           <text x="${PL - 5}" y="${PT - 2}" text-anchor="end" fill="var(--secondary-text-color)" font-size="9">${yUnit}</text>
+        </svg>
+      </div>`;
+  }
+
+  _renderDayChart() {
+    const measMetrics = this._getAvailableMetrics().filter(
+      (k) => ENTITY_META[k].statType === 'measurement',
+    );
+    if (measMetrics.length === 0) return '<div class="chart-section empty">No measurement data</div>';
+
+    const W = 500, H = 180, PL = 10, PR = 10, PT = 15, PB = 25;
+    const cW = W - PL - PR, cH = H - PT - PB;
+
+    const lineData = {};
+    for (const key of measMetrics) {
+      lineData[key] = this._getDayLineData(key);
+    }
+
+    let grid = '';
+    for (let i = 1; i <= 3; i++) {
+      const y = PT + (cH / 4) * i;
+      grid += `<line x1="${PL}" y1="${y}" x2="${W - PR}" y2="${y}" stroke="var(--divider-color,#e0e0e0)" stroke-width="0.5"/>`;
+    }
+
+    let lines = '';
+    for (const key of measMetrics) {
+      if (!this._visibleLines.has(key)) continue;
+      const data = lineData[key];
+      const values = data.filter((v) => v != null);
+      if (values.length === 0) continue;
+      const max = Math.max(...values);
+      if (max <= 0) continue;
+
+      const points = [];
+      for (let h = 0; h < 24; h++) {
+        if (data[h] == null) continue;
+        const x = PL + (h / 23) * cW;
+        const y = PT + cH - (data[h] / max) * cH * 0.9;
+        points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+      }
+      const color = LINE_COLORS[key] || '#999';
+      if (points.length > 1) {
+        lines += `<polyline points="${points.join(' ')}" fill="none" stroke="${color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+      } else if (points.length === 1) {
+        const [px, py] = points[0].split(',');
+        lines += `<circle cx="${px}" cy="${py}" r="3.5" fill="${color}"/>`;
+      }
+    }
+
+    let xLabels = '';
+    for (let h = 0; h < 24; h += 3) {
+      const x = PL + (h / 23) * cW;
+      xLabels += `<text x="${x}" y="${H - 5}" text-anchor="middle" fill="var(--secondary-text-color)" font-size="10">${h}h</text>`;
+    }
+
+    const toggles = measMetrics
+      .map((key) => {
+        const active = this._visibleLines.has(key);
+        const data = lineData[key];
+        const values = data.filter((v) => v != null);
+        const avg =
+          values.length > 0
+            ? values.reduce((s, v) => s + v, 0) / values.length
+            : 0;
+        const unit = this._units[key] || '';
+        const color = LINE_COLORS[key] || '#999';
+        const valStr =
+          avg > 0 ? ` ${formatValue(avg, key, unit)} ${unit}` : '';
+        return `<button class="line-toggle${active ? ' active' : ''}" data-line="${key}" style="--line-color:${color}"><span class="line-swatch"></span>${ENTITY_META[key].label}${valStr}</button>`;
+      })
+      .join('');
+
+    return `
+      <div class="chart-section">
+        <div class="line-toggles">${toggles}</div>
+        <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" class="chart-svg" role="img" aria-label="Day detail chart">
+          ${grid}${lines}${xLabels}
         </svg>
       </div>`;
   }
@@ -602,6 +753,7 @@ class FitnessStatsCard extends HTMLElement {
       b.addEventListener('click', () => {
         this._periodType = b.dataset.period;
         this._offset = 0;
+        this._drillFrom = null;
         this._fetchData();
       }),
     );
@@ -619,6 +771,26 @@ class FitnessStatsCard extends HTMLElement {
         this._render();
       }),
     );
+    this.shadowRoot.querySelectorAll('.chart-bar-hit').forEach((b) =>
+      b.addEventListener('click', () => {
+        this._drillToDay(parseInt(b.dataset.barIndex));
+      }),
+    );
+    this.shadowRoot.querySelectorAll('.line-toggle').forEach((b) =>
+      b.addEventListener('click', () => {
+        const key = b.dataset.line;
+        if (this._visibleLines.has(key)) {
+          this._visibleLines.delete(key);
+        } else {
+          this._visibleLines.add(key);
+        }
+        this._render();
+      }),
+    );
+    const backBtn = this.shadowRoot.querySelector('.back-btn');
+    if (backBtn) {
+      backBtn.addEventListener('click', () => this._drillBack());
+    }
   }
 
   // --- Styles ---
@@ -691,6 +863,32 @@ class FitnessStatsCard extends HTMLElement {
         border-color: var(--primary-color);
       }
       .chart-svg { width: 100%; height: auto; }
+      .chart-bar-hit { cursor: pointer; opacity: 0; }
+      .chart-bar-hit:hover { opacity: 0.08; fill: var(--primary-text-color); }
+
+      .line-toggles { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+      .line-toggle {
+        background: none; border: 1px solid var(--divider-color,#e0e0e0);
+        border-radius: 12px; padding: 2px 10px; font-size: 0.72em;
+        cursor: pointer; color: var(--disabled-text-color,#999);
+        font-family: inherit; display: flex; align-items: center; gap: 4px;
+        transition: border-color 0.2s, color 0.2s;
+      }
+      .line-toggle.active {
+        border-color: var(--line-color);
+        color: var(--primary-text-color);
+      }
+      .line-swatch {
+        display: inline-block; width: 14px; height: 3px;
+        background: var(--line-color); border-radius: 2px;
+      }
+
+      .back-btn {
+        background: none; border: none; color: var(--primary-color);
+        font-size: 0.82em; cursor: pointer; padding: 2px 8px;
+        font-family: inherit; border-radius: 4px; margin-right: 4px;
+      }
+      .back-btn:hover { background: var(--secondary-background-color,rgba(0,0,0,0.05)); }
 
       .goals-section {
         margin: 12px 0; padding-top: 12px;
