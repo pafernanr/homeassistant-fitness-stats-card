@@ -108,6 +108,9 @@ class FitnessStatsCard extends HTMLElement {
         }
       }
     }
+    if (!this._selectedMetric) {
+      this._selectedMetric = this._getAvailableMetrics()[0] || null;
+    }
     if (first && this._config) this._fetchData();
   }
 
@@ -198,6 +201,15 @@ class FitnessStatsCard extends HTMLElement {
           period,
         }),
       ]);
+      console.debug('fitness-stats-card: fetched', {
+        period: this._periodType,
+        offset: this._offset,
+        ids,
+        currentKeys: Object.keys(currentStats || {}),
+        currentEntries: Object.fromEntries(
+          Object.entries(currentStats || {}).map(([k, v]) => [k, v.length]),
+        ),
+      });
       this._currentStats = currentStats;
       this._previousStats = previousStats;
       this._currentRange = cur;
@@ -357,7 +369,13 @@ class FitnessStatsCard extends HTMLElement {
       return;
     }
     if (!this._currentStats) {
-      this.shadowRoot.innerHTML = '<ha-card><div style="padding:16px">Loading...</div></ha-card>';
+      this.shadowRoot.innerHTML = `
+        <style>${this._getStyles()}</style>
+        <ha-card><div class="card-content">
+          ${this._renderHeader()}
+          <div class="empty">Loading statistics...</div>
+        </div></ha-card>`;
+      this._attachListeners();
       return;
     }
 
@@ -692,6 +710,11 @@ class FitnessStatsCard extends HTMLElement {
       }
       .stat-label { color: var(--secondary-text-color); }
       .stat-value { font-weight: 500; color: var(--primary-text-color); }
+
+      .empty {
+        text-align: center; padding: 32px 16px;
+        color: var(--secondary-text-color); font-size: 0.9em;
+      }
     `;
   }
 }
